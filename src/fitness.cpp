@@ -15,9 +15,8 @@ double FitnessEvaluator::Evaluate(CircuitGenome& genome) {
     return genome.fitness;
   }
 
-  // Submit simulation to the worker thread and wait for result
-  auto future = SpiceSimulator::GetInstance().RunAcAnalysis(genome);
-  SimulationResult simResult = future.get();
+  // Submit simulation to worker thread (get future and wait for result)
+  SimulationResult simResult = SpiceSimulator::GetInstance().RunAcAnalysis(genome).get();
 
   // Handle different failure types
   if (!simResult.IsSuccess()) {
@@ -114,9 +113,8 @@ void FitnessEvaluator::PrintDetailedPerformance(const CircuitGenome& genome) con
     return;
   }
 
-  // Submit simulation and wait for result
-  auto future = SpiceSimulator::GetInstance().RunAcAnalysis(genome);
-  SimulationResult simResult = future.get();
+  // Submit simulation (get future and wait for result)
+  SimulationResult simResult = SpiceSimulator::GetInstance().RunAcAnalysis(genome).get();
 
   if (!simResult.IsSuccess()) {
     std::cout << "    Simulation failed: " << simResult.errorMessage << "\n";
@@ -139,24 +137,24 @@ void FitnessEvaluator::PrintDetailedPerformance(const CircuitGenome& genome) con
     
     if (harmonic.harmonicOrder == 1) {
       // Fundamental - show passband loss
-      std::cout << "        F0 (" << harmonic.harmonicFreqMhz << " MHz): " 
+      std::cout << "        F0 (" << harmonic.harmonicFreqMhz << " MHz): "
                 << std::setw(6) << std::fixed << std::setprecision(2) << attenuation << " dB loss";
       if (attenuation <= MaxPassbandLossDb) {
         std::cout << " ✓";
       } else {
-        std::cout << " ✗ (>" << MaxPassbandLossDb << " dB)";
+        std::cout << " ✗ (need better than " << MaxPassbandLossDb << " dB)";
       }
       std::cout << "\n";
     } else {
       // Harmonic - show stopband attenuation
       double outputLevel = harmonic.levelDbc - attenuation;
-      std::cout << "        H" << harmonic.harmonicOrder << " (" << harmonic.harmonicFreqMhz 
-                << " MHz): " << std::setw(6) << std::fixed << std::setprecision(2) 
+      std::cout << "        H" << harmonic.harmonicOrder << " (" << harmonic.harmonicFreqMhz
+                << " MHz): " << std::setw(6) << std::fixed << std::setprecision(2)
                 << outputLevel << " dBc";
       if (outputLevel <= TargetOutputDbc) {
         std::cout << " ✓";
       } else {
-        std::cout << " ✗ (>" << TargetOutputDbc << " dBc)";
+        std::cout << " ✗ (need better than " << TargetOutputDbc << " dBc)";
       }
       std::cout << "\n";
     }

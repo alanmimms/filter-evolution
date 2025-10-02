@@ -5,6 +5,10 @@
 #include <cstring>
 #include <sstream>
 #include <algorithm>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <signal.h>
 
 // Callback implementations (static functions)
 int SpiceSimulator::SendCharCallback(char* message, int id, void* user_data) {
@@ -48,23 +52,97 @@ SpiceSimulator& SpiceSimulator::GetInstance() {
 }
 
 SpiceSimulator::SpiceSimulator()
-  : shutdown_(false), ngspiceInitialized_(false) {
-  // Start the worker thread
-  workerThread_ = std::thread(&SpiceSimulator::WorkerThread, this);
+  : nextWorkerIdx_(0), shutdown_(false) {
+  // Don't spawn workers yet - wait for SetWorkerCount()
 }
 
 SpiceSimulator::~SpiceSimulator() {
-  // Signal shutdown
-  {
-    std::lock_guard<std::mutex> lock(queueMutex_);
-    shutdown_ = true;
+  ShutdownWorkers();
+}
+
+void SpiceSimulator::SetWorkerCount(int numWorkers) {
+  if (!workers_.empty()) {
+    return;  // Already initialized
   }
+
+  if (numWorkers <= 0) {
+    numWorkers = std::thread::hardware_concurrency();
+    if (numWorkers == 0) numWorkers = 4;
+  }
+
+  SpawnWorkers(numWorkers);
+
+  // Start orchestrator thread
+  orchestratorThread_ = std::thread(&SpiceSimulator::OrchestratorThread, this);
+}
+
+void SpiceSimulator::SpawnWorkers(int numWorkers) {
+  workers_.resize(numWorkers);
+
+  for (int i = 0; i < numWorkers; i++) {
+    // Create socketpair for IPC
+    int sockets[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0) {
+      std::cerr << "Failed to create socketpair for worker " << i << std::endl;
+      continue;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+      std::cerr << "Failed to fork worker " << i << std::endl;
+      close(sockets[0]);
+      close(sockets[1]);
+      continue;
+    }
+
+    if (pid == 0) {
+      // Child process
+      close(sockets[0]);  // Close parent end
+
+      // Close all other worker sockets inherited from parent
+      for (int j = 0; j < i; j++) {
+        if (workers_[j].socket_fd >= 0) {
+          close(workers_[j].socket_fd);
+        }
+      }
+
+      WorkerProcessMain(sockets[1]);
+      _exit(0);  // Worker should never return
+    }
+
+    // Parent process
+    close(sockets[1]);  // Close child end
+    workers_[i].pid = pid;
+    workers_[i].socket_fd = sockets[0];
+    workers_[i].busy = false;
+  }
+
+  std::cout << "Spawned " << numWorkers << " worker processes for parallel simulation\n";
+}
+
+void SpiceSimulator::ShutdownWorkers() {
+  shutdown_ = true;
   queueCV_.notify_all();
 
-  // Wait for worker thread to finish
-  if (workerThread_.joinable()) {
-    workerThread_.join();
+  // Wait for orchestrator to finish
+  if (orchestratorThread_.joinable()) {
+    orchestratorThread_.join();
   }
+
+  // Shutdown workers
+  for (auto& worker : workers_) {
+    if (worker.pid > 0) {
+      // Send empty string to signal shutdown
+      SendString(worker.socket_fd, "");
+      close(worker.socket_fd);
+
+      // Wait for worker to exit
+      int status;
+      waitpid(worker.pid, &status, 0);
+    }
+  }
+
+  workers_.clear();
 }
 
 std::future<SimulationResult> SpiceSimulator::RunAcAnalysis(const CircuitGenome& genome) {
@@ -87,11 +165,8 @@ std::future<SimulationResult> SpiceSimulator::RunAcAnalysis(const CircuitGenome&
   return future;
 }
 
-void SpiceSimulator::WorkerThread() {
-  // Initialize ngspice once in this thread
-  InitializeNgspice();
-
-  while (true) {
+void SpiceSimulator::OrchestratorThread() {
+  while (!shutdown_) {
     SimulationJob job("");
 
     // Wait for a job or shutdown signal
@@ -113,11 +188,152 @@ void SpiceSimulator::WorkerThread() {
       }
     }
 
-    // Process the job
-    SimulationResult result = RunSimulation(job.netlist);
+    // Get available worker
+    int workerIdx = GetAvailableWorker();
+
+    // Send to worker and get result
+    SimulationResult result = SendToWorker(workerIdx, job.netlist);
 
     // Send result back via promise
     job.result.set_value(std::move(result));
+  }
+}
+
+int SpiceSimulator::GetAvailableWorker() {
+  // Simple round-robin assignment
+  std::lock_guard<std::mutex> lock(workerMutex_);
+  int worker = nextWorkerIdx_;
+  nextWorkerIdx_ = (nextWorkerIdx_ + 1) % workers_.size();
+  return worker;
+}
+
+SimulationResult SpiceSimulator::SendToWorker(int workerIdx, const std::string& netlist) {
+  SimulationResult result;
+
+  if (workerIdx < 0 || workerIdx >= (int)workers_.size()) {
+    result.failureType = SimulationFailureType::InternalError;
+    result.errorMessage = "Invalid worker index";
+    return result;
+  }
+
+  WorkerProcess& worker = workers_[workerIdx];
+
+  // Send netlist
+  if (!SendString(worker.socket_fd, netlist)) {
+    result.failureType = SimulationFailureType::InternalError;
+    result.errorMessage = "Failed to send netlist to worker";
+    return result;
+  }
+
+  // Receive result
+  if (!ReceiveResult(worker.socket_fd, result)) {
+    result.failureType = SimulationFailureType::InternalError;
+    result.errorMessage = "Failed to receive result from worker";
+    return result;
+  }
+
+  return result;
+}
+
+// IPC functions
+bool SpiceSimulator::SendString(int fd, const std::string& str) {
+  uint32_t len = str.length();
+  if (write(fd, &len, sizeof(len)) != sizeof(len)) return false;
+  if (len > 0 && write(fd, str.data(), len) != (ssize_t)len) return false;
+  return true;
+}
+
+bool SpiceSimulator::ReceiveString(int fd, std::string& str) {
+  uint32_t len;
+  if (read(fd, &len, sizeof(len)) != sizeof(len)) return false;
+  if (len == 0) {
+    str.clear();
+    return true;
+  }
+  if (len > 10000000) return false;  // Sanity check
+
+  str.resize(len);
+  if (read(fd, &str[0], len) != (ssize_t)len) return false;
+  return true;
+}
+
+bool SpiceSimulator::SendResult(int fd, const SimulationResult& result) {
+  // Send failure type
+  uint32_t failType = static_cast<uint32_t>(result.failureType);
+  if (write(fd, &failType, sizeof(failType)) != sizeof(failType)) return false;
+
+  // Send error message
+  if (!SendString(fd, result.errorMessage)) return false;
+
+  // Send frequency response
+  uint32_t numPoints = result.response.frequencies.size();
+  if (write(fd, &numPoints, sizeof(numPoints)) != sizeof(numPoints)) return false;
+
+  if (numPoints > 0) {
+    if (write(fd, result.response.frequencies.data(), numPoints * sizeof(double)) != (ssize_t)(numPoints * sizeof(double))) return false;
+    if (write(fd, result.response.magnitudeDb.data(), numPoints * sizeof(double)) != (ssize_t)(numPoints * sizeof(double))) return false;
+    if (write(fd, result.response.phaseRad.data(), numPoints * sizeof(double)) != (ssize_t)(numPoints * sizeof(double))) return false;
+  }
+
+  return true;
+}
+
+bool SpiceSimulator::ReceiveResult(int fd, SimulationResult& result) {
+  // Receive failure type
+  uint32_t failType;
+  if (read(fd, &failType, sizeof(failType)) != sizeof(failType)) return false;
+  result.failureType = static_cast<SimulationFailureType>(failType);
+
+  // Receive error message
+  if (!ReceiveString(fd, result.errorMessage)) return false;
+
+  // Receive frequency response
+  uint32_t numPoints;
+  if (read(fd, &numPoints, sizeof(numPoints)) != sizeof(numPoints)) return false;
+
+  if (numPoints > 0) {
+    result.response.frequencies.resize(numPoints);
+    result.response.magnitudeDb.resize(numPoints);
+    result.response.phaseRad.resize(numPoints);
+
+    if (read(fd, result.response.frequencies.data(), numPoints * sizeof(double)) != (ssize_t)(numPoints * sizeof(double))) return false;
+    if (read(fd, result.response.magnitudeDb.data(), numPoints * sizeof(double)) != (ssize_t)(numPoints * sizeof(double))) return false;
+    if (read(fd, result.response.phaseRad.data(), numPoints * sizeof(double)) != (ssize_t)(numPoints * sizeof(double))) return false;
+  }
+
+  return true;
+}
+
+// Worker process entry point
+void SpiceSimulator::WorkerProcessMain(int socket_fd) {
+  // Initialize ngspice in worker process
+  InitializeNgspice();
+
+  // Run simulation loop
+  WorkerSimulationLoop(socket_fd);
+
+  close(socket_fd);
+}
+
+void SpiceSimulator::WorkerSimulationLoop(int socket_fd) {
+  while (true) {
+    // Receive netlist
+    std::string netlist;
+    if (!ReceiveString(socket_fd, netlist)) {
+      break;  // Connection closed or error
+    }
+
+    if (netlist.empty()) {
+      break;  // Shutdown signal
+    }
+
+    // Run simulation
+    SimulationResult result = RunSimulation(netlist);
+
+    // Send result back
+    if (!SendResult(socket_fd, result)) {
+      break;  // Connection closed or error
+    }
   }
 }
 
@@ -133,21 +349,12 @@ void SpiceSimulator::InitializeNgspice() {
   );
 
   if (result != 0) {
-    std::cerr << "Failed to initialize NGSpice library" << std::endl;
-    ngspiceInitialized_ = false;
-  } else {
-    ngspiceInitialized_ = true;
+    std::cerr << "Worker: Failed to initialize NGSpice library" << std::endl;
   }
 }
 
 SimulationResult SpiceSimulator::RunSimulation(const std::string& netlist) {
   SimulationResult result;
-
-  if (!ngspiceInitialized_) {
-    result.failureType = SimulationFailureType::InternalError;
-    result.errorMessage = "NGSpice not initialized";
-    return result;
-  }
 
   // Convert netlist string to array of char* for ngSpice_Circ
   std::vector<char*> circuitLines;

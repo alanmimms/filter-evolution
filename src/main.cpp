@@ -6,6 +6,7 @@
 #include "genome.h"
 #include "evolution.h"
 #include "fitness.h"
+#include "spice_interface.h"
 
 std::vector<HarmonicSpec> LoadHarmonicData(const std::string& filename) {
   std::vector<HarmonicSpec> specs;
@@ -216,7 +217,10 @@ int main(int argc, char* argv[]) {
   
   std::cout << "Loaded " << harmonics.size() << " harmonic specifications\n";
   std::cout << "Covering " << harmonics.size() / 5 << " bands\n\n";
-  
+
+  // Initialize simulator with worker processes
+  SpiceSimulator::GetInstance().SetWorkerCount(config.numThreads);
+
   auto evaluator = std::make_shared<FitnessEvaluator>(harmonics);
   EvolutionaryOptimizer optimizer(config, evaluator);
   CircuitGenome best = optimizer.Optimize();

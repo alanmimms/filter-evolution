@@ -200,31 +200,41 @@ void EvolutionaryOptimizer::NextGeneration() {
 
 CircuitGenome EvolutionaryOptimizer::CreateLadderSeed(int stages) const {
   CircuitGenome genome;
-  
+
+  // E24 values to use for ladder: progression through decades
+  // Inductors: 220nH, 470nH, 1uH, 2.2uH, etc.
+  // Capacitors: 330pF, 680pF, 1.5nF, 3.3nF, etc.
+  const double inductorValues[] = {220.0, 470.0, 1000.0, 2200.0, 4700.0};  // nH
+  const double capacitorValues[] = {330.0, 680.0, 1500.0, 3300.0, 6800.0}; // pF
+
   // Create simple ladder network
   int compIdx = 0;
   for (int i = 0; i < stages && compIdx < CircuitGenome::MaxComponents - 1; ++i) {
-    int currentNode = (i == 0) ? CircuitGenome::NodeInput : 
+    int currentNode = (i == 0) ? CircuitGenome::NodeInput :
                       CircuitGenome::FirstInternalNode + i - 1;
     int nextNode = (i == stages - 1) ? CircuitGenome::NodeOutput :
                    CircuitGenome::FirstInternalNode + i;
-    
-    // Series inductor
+
+    // Series inductor with E24 value
     genome.components[compIdx++] = Component(
-      ComponentType::Inductor, 200.0 + i * 50.0, currentNode, nextNode, true
+      ComponentType::Inductor,
+      inductorValues[i % 5],
+      currentNode, nextNode, true
     );
-    
-    // Shunt capacitor to ground
+
+    // Shunt capacitor to ground with E24 value
     genome.components[compIdx++] = Component(
-      ComponentType::Capacitor, 300.0 + i * 100.0, nextNode, 
+      ComponentType::Capacitor,
+      capacitorValues[i % 5],
+      nextNode,
       CircuitGenome::NodeGround, true
     );
   }
-  
+
   // Deactivate remaining components
   for (int i = compIdx; i < CircuitGenome::MaxComponents; ++i) {
     genome.components[i].active = false;
   }
-  
+
   return genome;
 }

@@ -33,16 +33,27 @@ public:
   static constexpr int NodeOutput = 1;
   static constexpr int NodeGround = 2;
   static constexpr int FirstInternalNode = 3;
-  
-  // Component value ranges
-  static constexpr double MinInductorNh = 10.0;
-  static constexpr double MaxInductorNh = 5000.0;
-  static constexpr double MinCapacitorPf = 10.0;
-  static constexpr double MaxCapacitorPf = 5000.0;
-  
+
+  // E24 series (2% tolerance) base values
+  static constexpr double E24Values[] = {
+    1.0, 1.1, 1.2, 1.3, 1.5, 1.6, 1.8, 2.0, 2.2, 2.4,
+    2.7, 3.0, 3.3, 3.6, 3.9, 4.3, 4.7, 5.1, 5.6, 6.2,
+    6.8, 7.5, 8.2, 9.1
+  };
+  static constexpr int NumE24Values = 24;
+
+  // Decade ranges for inductors (nH) and capacitors (pF)
+  // Inductors: 10nH to 500uH (10, 100, 1000, 10000, 100000, 500000 nH decades)
+  // Capacitors: 10pF to 100nF (10, 100, 1000, 10000, 100000 pF decades)
+  static constexpr double InductorDecades[] = {10.0, 100.0, 1000.0, 10000.0, 100000.0, 500000.0};
+  static constexpr double CapacitorDecades[] = {10.0, 100.0, 1000.0, 10000.0, 100000.0};
+  static constexpr int NumInductorDecades = 6;
+  static constexpr int NumCapacitorDecades = 5;
+  static constexpr int NumDecades = 6;  // Max of the two
+
   std::vector<Component> components;
   double fitness;
-  
+
   CircuitGenome();
   void Randomize(std::mt19937& rng);
   void Mutate(double mutationRate, std::mt19937& rng);
@@ -50,7 +61,13 @@ public:
   bool IsValid() const;
   int CountActiveComponents() const;
   int CountActiveInductors() const;
-  
+
+  // Helper to get E24 value
+  static double GetE24Value(int valueIndex, int decadeIndex);
+  static double GetRandomE24Inductor(std::mt19937& rng);
+  static double GetRandomE24Capacitor(std::mt19937& rng);
+  static double GetClosestE24Value(double value, bool isInductor);
+
 private:
   bool HasPath(int from, int to) const;
   std::set<int> GetConnectedNodes() const;

@@ -8,6 +8,7 @@
 #include <future>
 #include <memory>
 #include <atomic>
+#include <sys/types.h>
 
 // Include ngspice types for callbacks
 #include <ngspice/sharedspice.h>
@@ -54,6 +55,15 @@ struct SimulationJob {
   SimulationJob& operator=(const SimulationJob&) = delete;
 };
 
+// Worker process information
+struct WorkerProcess {
+  pid_t pid;
+  int socket_fd;
+  bool busy;
+
+  WorkerProcess() : pid(-1), socket_fd(-1), busy(false) {}
+};
+
 class SpiceSimulator {
 public:
   SpiceSimulator();
@@ -65,20 +75,47 @@ public:
   // Get singleton instance
   static SpiceSimulator& GetInstance();
 
+  // Set number of worker processes (call before first use)
+  void SetWorkerCount(int numWorkers);
+
 private:
-  // Worker thread that runs all ngspice simulations sequentially
-  void WorkerThread();
+  // Spawn worker processes
+  void SpawnWorkers(int numWorkers);
 
-  // Initialize ngspice library (called once in worker thread)
-  void InitializeNgspice();
+  // Shutdown all workers
+  void ShutdownWorkers();
 
-  // Run a single simulation using ngspice library
-  SimulationResult RunSimulation(const std::string& netlist);
+  // Orchestrator thread that distributes work to processes
+  void OrchestratorThread();
 
-  // Parse ngspice vector data into FrequencyResponse
-  bool ExtractFrequencyResponse(FrequencyResponse& response);
+  // Find available worker (round-robin)
+  int GetAvailableWorker();
 
-  // Callbacks for ngspice (static members) - need to match ngspice API exactly
+  // Send job to worker process and get result
+  SimulationResult SendToWorker(int workerIdx, const std::string& netlist);
+
+  // Worker process entry point (runs in child process)
+  static void WorkerProcessMain(int socket_fd);
+
+  // Worker process simulation loop
+  static void WorkerSimulationLoop(int socket_fd);
+
+  // IPC: Send/receive data over socket
+  static bool SendString(int fd, const std::string& str);
+  static bool ReceiveString(int fd, std::string& str);
+  static bool SendResult(int fd, const SimulationResult& result);
+  static bool ReceiveResult(int fd, SimulationResult& result);
+
+  // Worker process: Initialize ngspice library
+  static void InitializeNgspice();
+
+  // Worker process: Run a single simulation
+  static SimulationResult RunSimulation(const std::string& netlist);
+
+  // Worker process: Extract frequency response
+  static bool ExtractFrequencyResponse(FrequencyResponse& response);
+
+  // Callbacks for ngspice (static members)
   static int SendCharCallback(char* message, int id, void* user_data);
   static int SendStatCallback(char* message, int id, void* user_data);
   static int ControlledExitCallback(int status, NG_BOOL immediate, NG_BOOL quit, int id, void* user_data);
@@ -86,19 +123,17 @@ private:
   static int SendInitDataCallback(pvecinfoall data, int id, void* user_data);
   static int BGThreadRunningCallback(NG_BOOL running, int id, void* user_data);
 
-  // Thread-safe job queue
+  // Worker processes
+  std::vector<WorkerProcess> workers_;
+  std::mutex workerMutex_;
+  int nextWorkerIdx_;
+
+  // Job queue for orchestrator
   std::queue<SimulationJob> jobQueue_;
   std::mutex queueMutex_;
   std::condition_variable queueCV_;
 
-  // Worker thread
-  std::thread workerThread_;
+  // Orchestrator thread
+  std::thread orchestratorThread_;
   std::atomic<bool> shutdown_;
-
-  // NGSpice initialization flag
-  bool ngspiceInitialized_;
-
-  // Capture output for debugging
-  std::mutex outputMutex_;
-  std::string lastOutput_;
 };
