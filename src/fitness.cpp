@@ -5,7 +5,8 @@
 #include <iomanip>
 
 FitnessEvaluator::FitnessEvaluator(const std::vector<HarmonicSpec>& harmonics)
-  : harmonicSpecs(harmonics), simulator(std::make_unique<SpiceSimulator>()) {
+  : harmonicSpecs(harmonics) {
+  // Use singleton instance instead of per-evaluator instance
 }
 
 double FitnessEvaluator::Evaluate(CircuitGenome& genome) {
@@ -13,22 +14,44 @@ double FitnessEvaluator::Evaluate(CircuitGenome& genome) {
     genome.fitness = 1e9;
     return genome.fitness;
   }
-  
-  std::string netlist = genome.ToSpiceNetlist();
-  FrequencyResponse response = simulator->RunAcAnalysis(netlist);
-  
-  if (response.IsEmpty()) {
-    genome.fitness = 1e8;
-    return genome.fitness;
+
+  // Submit simulation to the worker thread and wait for result
+  auto future = SpiceSimulator::GetInstance().RunAcAnalysis(genome);
+  SimulationResult simResult = future.get();
+
+  // Handle different failure types
+  if (!simResult.IsSuccess()) {
+    switch (simResult.failureType) {
+      case SimulationFailureType::InvalidCircuit:
+        // Circuit structure is invalid - high penalty
+        genome.fitness = 1e8;
+        return genome.fitness;
+
+      case SimulationFailureType::SimulationError:
+        // NGSpice couldn't simulate (convergence, etc.) - penalize but less than invalid
+        genome.fitness = 1e7;
+        return genome.fitness;
+
+      case SimulationFailureType::InternalError:
+        // Bug in our code or NGSpice - report and treat as very bad
+        std::cerr << "Internal error: " << simResult.errorMessage << std::endl;
+        genome.fitness = 1e9;
+        return genome.fitness;
+
+      default:
+        genome.fitness = 1e9;
+        return genome.fitness;
+    }
   }
-  
+
+  const FrequencyResponse& response = simResult.response;
   double penalty = 0.0;
-  
+
   // Evaluate each harmonic specification
   for (const auto& harmonic : harmonicSpecs) {
     double freqHz = harmonic.harmonicFreqMhz * 1e6;
     double attenuation = -InterpolateAtFrequency(response, freqHz);
-    
+
     if (harmonic.harmonicOrder == 1) {
       // Fundamental - check passband loss
       if (attenuation > MaxPassbandLossDb) {
@@ -37,7 +60,7 @@ double FitnessEvaluator::Evaluate(CircuitGenome& genome) {
     } else {
       // Harmonic - check stopband attenuation
       double outputLevel = harmonic.levelDbc - attenuation;
-      
+
       if (outputLevel > TargetOutputDbc) {
         double shortfall = outputLevel - TargetOutputDbc;
         // Weight by harmonic order - 2nd harmonic is most critical
@@ -46,11 +69,11 @@ double FitnessEvaluator::Evaluate(CircuitGenome& genome) {
       }
     }
   }
-  
+
   // Inductor cost penalty
   int inductorCount = genome.CountActiveInductors();
   penalty += inductorCount * 10.0;  // Prefer fewer inductors
-  
+
   genome.fitness = penalty;
   return penalty;
 }
@@ -90,15 +113,17 @@ void FitnessEvaluator::PrintDetailedPerformance(const CircuitGenome& genome) con
     std::cout << "    Circuit is invalid - no connectivity path\n";
     return;
   }
-  
-  std::string netlist = genome.ToSpiceNetlist();
-  FrequencyResponse response = simulator->RunAcAnalysis(netlist);
-  
-  if (response.IsEmpty()) {
-    std::cout << "    Simulation failed\n";
+
+  // Submit simulation and wait for result
+  auto future = SpiceSimulator::GetInstance().RunAcAnalysis(genome);
+  SimulationResult simResult = future.get();
+
+  if (!simResult.IsSuccess()) {
+    std::cout << "    Simulation failed: " << simResult.errorMessage << "\n";
     return;
   }
-  
+
+  const FrequencyResponse& response = simResult.response;
   std::cout << "    Harmonic Performance:\n";
   
   // Group by band

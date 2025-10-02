@@ -46,7 +46,7 @@ public:
   CircuitGenome();
   void Randomize(std::mt19937& rng);
   void Mutate(double mutationRate, std::mt19937& rng);
-  std::string ToSpiceNetlist() const;
+  std::string ToSpiceNetlist(const std::string& outputFile = "output.txt") const;
   bool IsValid() const;
   int CountActiveComponents() const;
   int CountActiveInductors() const;

@@ -16,18 +16,18 @@ struct HarmonicSpec {
 class FitnessEvaluator {
 public:
   FitnessEvaluator(const std::vector<HarmonicSpec>& harmonics);
-  
+
   double Evaluate(CircuitGenome& genome);
   void PrintDetailedPerformance(const CircuitGenome& genome) const;
-  
+
 private:
   std::vector<HarmonicSpec> harmonicSpecs;
-  std::unique_ptr<SpiceSimulator> simulator;
-  
+  // Removed simulator member - now using singleton
+
   static constexpr double TargetOutputDbc = -50.0;
   static constexpr double MaxPassbandLossDb = 0.5;
   static constexpr double InductorCostPerNh = 0.001;
-  
-  double InterpolateAtFrequency(const FrequencyResponse& response, 
+
+  double InterpolateAtFrequency(const FrequencyResponse& response,
                                  double freqHz) const;
 };

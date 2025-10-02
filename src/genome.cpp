@@ -95,46 +95,51 @@ void CircuitGenome::Mutate(double mutationRate, std::mt19937& rng) {
   }
 }
 
-std::string CircuitGenome::ToSpiceNetlist() const {
+std::string CircuitGenome::ToSpiceNetlist(const std::string& outputFile) const {
   std::ostringstream netlist;
-  
+
   netlist << "* Evolved Filter Circuit\n";
   netlist << "Vin in 0 AC 1\n";
   netlist << "Rin in input 50\n";
-  
+
   auto nodeToName = [](int node) -> std::string {
     if (node == NodeInput) return "input";
     if (node == NodeOutput) return "output";
     if (node == NodeGround) return "0";
     return "n" + std::to_string(node);
   };
-  
+
   int lCount = 0, cCount = 0;
   for (const auto& comp : components) {
     if (!comp.active) continue;
-    
+
     std::string nodeA = nodeToName(comp.nodeA);
     std::string nodeB = nodeToName(comp.nodeB);
-    
+
     if (comp.type == ComponentType::Inductor) {
       double valueH = comp.value * 1e-9;
-      netlist << "L" << ++lCount << " " << nodeA << " " << nodeB 
+      netlist << "L" << ++lCount << " " << nodeA << " " << nodeB
               << " " << std::scientific << valueH << "\n";
     } else {
       double valueF = comp.value * 1e-12;
-      netlist << "C" << ++cCount << " " << nodeA << " " << nodeB 
+      netlist << "C" << ++cCount << " " << nodeA << " " << nodeB
               << " " << std::scientific << valueF << "\n";
     }
   }
-  
+
   netlist << "Rload output 0 50\n";
   netlist << ".ac dec 50 1e6 150e6\n";
-  netlist << ".control\n";
-  netlist << "run\n";
-  netlist << "print frequency vdb(output) vp(output) > output.txt\n";
-  netlist << ".endc\n";
+
+  // For file output (used when saving best circuit)
+  if (!outputFile.empty()) {
+    netlist << ".control\n";
+    netlist << "run\n";
+    netlist << "print frequency vdb(output) vp(output) > " << outputFile << "\n";
+    netlist << ".endc\n";
+  }
+
   netlist << ".end\n";
-  
+
   return netlist.str();
 }
 
