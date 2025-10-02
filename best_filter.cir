@@ -1,0 +1,23 @@
+* Evolved Filter Circuit
+Vin in 0 AC 1
+Rin in input 50
+L1 n9 n10 1.959890e-06
+C1 n11 n8 2.042896e-09
+L2 0 n6 1.565466e-06
+L3 n6 n10 1.625753e-06
+C2 n10 n9 1.737882e-09
+L4 n9 n4 5.000000e-06
+C3 input 0 1.149743e-09
+C4 0 n6 2.584073e-09
+C5 output n6 5.000000e-09
+L5 n4 n8 4.893682e-06
+L6 output n7 5.000000e-06
+C6 n11 n9 1.266617e-09
+C7 0 input 1.171273e-09
+Rload output 0 50
+.ac dec 50 1e6 150e6
+.control
+run
+print frequency vdb(output) vp(output) > output.txt
+.endc
+.end
