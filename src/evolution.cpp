@@ -109,18 +109,25 @@ void EvolutionaryOptimizer::InitializePopulation() {
 }
 
 void EvolutionaryOptimizer::EvaluatePopulation() {
-  // Parallel evaluation using threads
-  std::vector<std::future<void>> futures;
+  // Batch parallel evaluation to respect thread limit
+  size_t numThreads = static_cast<size_t>(config.numThreads);
+  size_t batchSize = numThreads;
   
-  for (size_t i = 0; i < population.size(); ++i) {
-    futures.push_back(std::async(std::launch::async, [this, i]() {
-      fitnessEvaluator->Evaluate(population[i]);
-    }));
-  }
-  
-  // Wait for all evaluations to complete
-  for (auto& future : futures) {
-    future.wait();
+  for (size_t start = 0; start < population.size(); start += batchSize) {
+    size_t end = std::min(start + batchSize, population.size());
+    std::vector<std::future<void>> futures;
+    
+    // Process batch of individuals
+    for (size_t i = start; i < end; ++i) {
+      futures.push_back(std::async(std::launch::async, [this, i]() {
+        fitnessEvaluator->Evaluate(population[i]);
+      }));
+    }
+    
+    // Wait for this batch to complete before starting next
+    for (auto& future : futures) {
+      future.wait();
+    }
   }
 }
 
