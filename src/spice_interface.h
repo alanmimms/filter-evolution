@@ -13,8 +13,8 @@
 // Include ngspice types for callbacks
 #include <ngspice/sharedspice.h>
 
-// Forward declaration
-class CircuitGenome;
+// Need full definition for struct members
+#include "genome.h"
 
 struct FrequencyResponse {
   std::vector<double> frequencies;
@@ -41,12 +41,35 @@ struct SimulationResult {
   bool IsSuccess() const { return failureType == SimulationFailureType::Success; }
 };
 
+
+// Configuration for evolution (needed by workers)
+struct EvolutionConfig {
+  int populationSize;
+  int generations;
+  int eliteCount;
+  double mutationRate;
+  double crossoverRate;
+  int tournamentSize;
+  int numThreads;
+};
+
+// Result from worker containing genome, fitness, and simulation data
+struct EvaluationResult {
+  CircuitGenome genome;
+  double fitness;
+  SimulationResult simResult;
+
+  EvaluationResult() : fitness(-1e9) {}
+};
+
 // Internal job structure for the queue
 struct SimulationJob {
-  std::string netlist;
-  std::promise<SimulationResult> result;
+  CircuitGenome genome;
+  std::promise<EvaluationResult> result;
+  bool generateOffspring;  // If true, worker creates genome via selection/crossover/mutation
 
-  SimulationJob(std::string nl) : netlist(std::move(nl)) {}
+  SimulationJob(CircuitGenome g, bool genOffspring = false)
+    : genome(std::move(g)), generateOffspring(genOffspring) {}
 
   // Make movable but not copyable (because of promise)
   SimulationJob(SimulationJob&&) = default;
@@ -59,9 +82,10 @@ struct SimulationJob {
 struct WorkerProcess {
   pid_t pid;
   int socket_fd;
+  int stderr_fd;  // Pipe to capture stderr from worker process
   bool busy;
 
-  WorkerProcess() : pid(-1), socket_fd(-1), busy(false) {}
+  WorkerProcess() : pid(-1), socket_fd(-1), stderr_fd(-1), busy(false) {}
 };
 
 class SpiceSimulator {
@@ -69,14 +93,31 @@ public:
   SpiceSimulator();
   ~SpiceSimulator();
 
-  // Main API: submit a simulation and get a future result
-  std::future<SimulationResult> RunAcAnalysis(const CircuitGenome& genome);
+  // Main API: submit a genome for evaluation and get back genome with fitness
+  std::future<EvaluationResult> EvaluateGenome(CircuitGenome genome);
 
   // Get singleton instance
   static SpiceSimulator& GetInstance();
 
   // Set number of worker processes (call before first use)
   void SetWorkerCount(int numWorkers);
+
+  // Set fitness evaluator (needed by worker threads)
+  void SetFitnessEvaluator(std::shared_ptr<class FitnessEvaluator> evaluator);
+
+  // Set evolution configuration (needed by worker threads)
+  void SetEvolutionConfig(const EvolutionConfig& config);
+
+  // Update shared population (called by orchestrator after sorting)
+  void UpdatePopulation(const std::vector<CircuitGenome>& pop);
+
+  // Request offspring from workers (workers do selection/crossover/mutation/simulation)
+  std::vector<std::future<EvaluationResult>> GenerateOffspring(int count);
+
+private:
+  // Evolution operations used by worker threads
+  CircuitGenome TournamentSelect(std::mt19937& rng);
+  CircuitGenome Crossover(const CircuitGenome& parent1, const CircuitGenome& parent2, std::mt19937& rng);
 
 private:
   // Spawn worker processes
@@ -85,13 +126,16 @@ private:
   // Shutdown all workers
   void ShutdownWorkers();
 
-  // Orchestrator thread that distributes work to processes
-  void OrchestratorThread();
+  // Worker threads that handle communication with worker processes
+  void WorkerThread(int workerIdx);
 
-  // Find available worker (round-robin)
-  int GetAvailableWorker();
+  // Stderr monitor thread for filtering worker process errors
+  void StderrMonitorThread(int workerIdx);
 
-  // Send job to worker process and get result
+  // Filter and handle stderr message from worker process
+  static void FilterStderrMessage(const std::string& message);
+
+  // Send job to worker process and get result (blocking)
   SimulationResult SendToWorker(int workerIdx, const std::string& netlist);
 
   // Worker process entry point (runs in child process)
@@ -126,14 +170,29 @@ private:
   // Worker processes
   std::vector<WorkerProcess> workers_;
   std::mutex workerMutex_;
-  int nextWorkerIdx_;
+  std::atomic<int> nextWorkerIdx_;
 
-  // Job queue for orchestrator
-  std::queue<SimulationJob> jobQueue_;
-  std::mutex queueMutex_;
-  std::condition_variable queueCV_;
+  // Per-worker job queues (one queue per worker thread)
+  std::vector<std::unique_ptr<std::queue<SimulationJob>>> perWorkerQueues_;
+  std::vector<std::unique_ptr<std::mutex>> perWorkerMutexes_;
+  std::vector<std::unique_ptr<std::condition_variable>> perWorkerCVs_;
 
-  // Orchestrator thread
-  std::thread orchestratorThread_;
+  // Worker threads (one per worker process)
+  std::vector<std::thread> workerThreads_;
+
+  // Stderr monitor threads (one per worker process)
+  std::vector<std::thread> stderrMonitorThreads_;
+
   std::atomic<bool> shutdown_;
+
+  // Fitness evaluator shared by all worker threads
+  std::shared_ptr<class FitnessEvaluator> fitnessEvaluator_;
+
+  // Evolution configuration
+  EvolutionConfig evolutionConfig_;
+  bool evolutionConfigSet_;
+
+  // Shared population (read-only for workers)
+  std::vector<CircuitGenome> sharedPopulation_;
+  std::mutex populationMutex_;
 };

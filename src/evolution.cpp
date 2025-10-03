@@ -16,28 +16,59 @@ EvolutionaryOptimizer::EvolutionaryOptimizer(
 CircuitGenome EvolutionaryOptimizer::Optimize() {
   std::cout << "Initializing population...\n";
   InitializePopulation();
-  
+
+  // Initialize workers with evolution configuration
+  SpiceSimulator::GetInstance().SetEvolutionConfig(config);
+
   std::cout << "Starting evolution for " << config.generations << " generations\n";
   std::cout << std::string(90, '=') << "\n";
   std::cout << "Progress Legend:\n";
-  std::cout << "  Best:      Lowest fitness score (lower is better)\n";
+  std::cout << "  Best:      Highest fitness score (higher is better)\n";
   std::cout << "  Avg:       Average fitness across population\n";
   std::cout << "  Valid:     Circuits with valid topology (input->output path)\n";
   std::cout << "  Comps:     Average active components in valid circuits\n";
   std::cout << "  Inductors: Average inductors in valid circuits\n";
   std::cout << std::string(90, '-') << "\n";
-  
+
+  // Initial evaluation of seeded population
+  EvaluatePopulation();
+  SortPopulation();
+
   for (int gen = 0; gen < config.generations; ++gen) {
-    EvaluatePopulation();
+    // Update shared population for workers to read
+    SpiceSimulator::GetInstance().UpdatePopulation(population);
+
+    // Calculate how many offspring to generate
+    int offspringCount = config.populationSize - config.eliteCount;
+
+    // Request workers to generate offspring (they do selection/crossover/mutation/simulation)
+    auto futures = SpiceSimulator::GetInstance().GenerateOffspring(offspringCount);
+
+    // Collect offspring from workers
+    std::vector<CircuitGenome> newPopulation;
+    newPopulation.reserve(config.populationSize);
+
+    // Keep elite individuals
+    for (int i = 0; i < config.eliteCount && i < (int)population.size(); ++i) {
+      newPopulation.push_back(population[i]);
+    }
+
+    // Get offspring from workers
+    for (auto& future : futures) {
+      EvaluationResult result = future.get();
+      newPopulation.push_back(std::move(result.genome));
+    }
+
+    population = std::move(newPopulation);
     SortPopulation();
-    
+
     if (gen % 5 == 0) {
       // Calculate statistics
       double avgFitness = 0.0;
       int validCircuits = 0;
       int totalActiveComponents = 0;
       int totalActiveInductors = 0;
-      
+
       for (const auto& genome : population) {
         avgFitness += genome.fitness;
         if (genome.IsValid()) {
@@ -47,47 +78,41 @@ CircuitGenome EvolutionaryOptimizer::Optimize() {
         }
       }
       avgFitness /= population.size();
-      
+
       double avgComponents = validCircuits > 0 ? (double)totalActiveComponents / validCircuits : 0;
       double avgInductors = validCircuits > 0 ? (double)totalActiveInductors / validCircuits : 0;
-      
-      std::cout << "Gen " << std::setw(4) << gen 
-                << " | Best: " << std::setw(10) << std::fixed << std::setprecision(1) 
+
+      std::cout << "Gen " << std::setw(4) << gen
+                << " | Best: " << std::setw(10) << std::fixed << std::setprecision(1)
                 << population[0].fitness
                 << " | Avg: " << std::setw(10) << std::fixed << std::setprecision(1) << avgFitness
                 << " | Valid: " << std::setw(3) << validCircuits << "/" << population.size()
                 << " | Comps: " << std::setw(4) << std::fixed << std::setprecision(1) << avgComponents
                 << " | Inductors: " << std::setw(4) << std::fixed << std::setprecision(1) << avgInductors
                 << "\n";
-      
+
       // Show best circuit details every 25 generations
       if (gen % 25 == 0 && population[0].IsValid()) {
-        std::cout << "    Best circuit: " << population[0].CountActiveComponents() 
+        std::cout << "    Best circuit: " << population[0].CountActiveComponents()
                   << " components (" << population[0].CountActiveInductors() << " inductors)\n";
         fitnessEvaluator->PrintDetailedPerformance(population[0]);
       }
     }
-    
-    NextGeneration();
   }
-  
-  // Final evaluation
-  EvaluatePopulation();
-  SortPopulation();
-  
+
   std::cout << std::string(90, '=') << "\n";
   std::cout << "Evolution complete!\n";
   std::cout << "Best fitness: " << population[0].fitness << "\n";
   std::cout << "Active components: " << population[0].CountActiveComponents() << "\n";
   std::cout << "Active inductors: " << population[0].CountActiveInductors() << "\n\n";
-  
+
   if (population[0].IsValid()) {
     std::cout << "FINAL PERFORMANCE ANALYSIS:\n";
     fitnessEvaluator->PrintDetailedPerformance(population[0]);
   } else {
     std::cout << "Warning: Best circuit is invalid!\n";
   }
-  
+
   return population[0];
 }
 
@@ -109,44 +134,38 @@ void EvolutionaryOptimizer::InitializePopulation() {
 }
 
 void EvolutionaryOptimizer::EvaluatePopulation() {
-  // Batch parallel evaluation to respect thread limit
-  size_t numThreads = static_cast<size_t>(config.numThreads);
-  size_t batchSize = numThreads;
-  
-  for (size_t start = 0; start < population.size(); start += batchSize) {
-    size_t end = std::min(start + batchSize, population.size());
-    std::vector<std::future<void>> futures;
-    
-    // Process batch of individuals
-    for (size_t i = start; i < end; ++i) {
-      futures.push_back(std::async(std::launch::async, [this, i]() {
-        fitnessEvaluator->Evaluate(population[i]);
-      }));
-    }
-    
-    // Wait for this batch to complete before starting next
-    for (auto& future : futures) {
-      future.wait();
-    }
+  // Submit all genomes to worker pool (workers do netlist generation + simulation + fitness)
+  std::vector<std::future<EvaluationResult>> futures;
+  futures.reserve(population.size());
+
+  for (auto& genome : population) {
+    // Move genome to worker - worker will evaluate and return it with fitness
+    futures.push_back(SpiceSimulator::GetInstance().EvaluateGenome(std::move(genome)));
+  }
+
+  // Wait for all results and update population
+  for (size_t i = 0; i < population.size(); ++i) {
+    EvaluationResult result = futures[i].get();
+    population[i] = std::move(result.genome);
   }
 }
 
 void EvolutionaryOptimizer::SortPopulation() {
   std::sort(population.begin(), population.end(),
             [](const CircuitGenome& a, const CircuitGenome& b) {
-              return a.fitness < b.fitness;
+              return a.fitness > b.fitness;  // Higher fitness is better
             });
 }
 
 CircuitGenome& EvolutionaryOptimizer::TournamentSelect() {
   std::uniform_int_distribution<> dist(0, population.size() - 1);
-  
+
   int bestIdx = dist(rng);
   double bestFitness = population[bestIdx].fitness;
-  
+
   for (int i = 1; i < config.tournamentSize; ++i) {
     int idx = dist(rng);
-    if (population[idx].fitness < bestFitness) {
+    if (population[idx].fitness > bestFitness) {  // Higher fitness is better
       bestIdx = idx;
       bestFitness = population[idx].fitness;
     }

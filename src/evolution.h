@@ -4,16 +4,7 @@
 #include <memory>
 #include "genome.h"
 #include "fitness.h"
-
-struct EvolutionConfig {
-  int populationSize = 100;
-  int generations = 500;
-  int eliteCount = 5;
-  double mutationRate = 0.15;
-  double crossoverRate = 0.7;
-  int tournamentSize = 5;
-  int numThreads = 8;
-};
+#include "spice_interface.h"  // For EvolutionConfig
 
 class EvolutionaryOptimizer {
 public:
