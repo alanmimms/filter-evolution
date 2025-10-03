@@ -10,41 +10,53 @@ FitnessEvaluator::FitnessEvaluator(const std::vector<HarmonicSpec>& harmonics)
 }
 
 double FitnessEvaluator::Evaluate(CircuitGenome& genome) {
+  // This method is deprecated - use EvaluateGenome() instead
+  // Only kept for PrintDetailedPerformance
   if (!genome.IsValid()) {
-    genome.fitness = 1e9;
+    genome.fitness = -1e9;
     return genome.fitness;
   }
 
-  // Submit simulation to worker thread (get future and wait for result)
-  SimulationResult simResult = SpiceSimulator::GetInstance().RunAcAnalysis(genome).get();
+  // Evaluate genome (worker does simulation + fitness computation)
+  EvaluationResult result = SpiceSimulator::GetInstance().EvaluateGenome(genome).get();
+  genome = std::move(result.genome);
+  return genome.fitness;
+}
 
-  // Handle different failure types
+double FitnessEvaluator::ComputeFitness(CircuitGenome& genome, const SimulationResult& simResult) {
+  // Higher fitness is better, negative fitness is penalty
+  if (!genome.IsValid()) {
+    genome.fitness = -1e9;
+    return genome.fitness;
+  }
+
+  // Handle different failure types with negative fitness
   if (!simResult.IsSuccess()) {
     switch (simResult.failureType) {
       case SimulationFailureType::InvalidCircuit:
         // Circuit structure is invalid - high penalty
-        genome.fitness = 1e8;
+        genome.fitness = -1e8;
         return genome.fitness;
 
       case SimulationFailureType::SimulationError:
         // NGSpice couldn't simulate (convergence, etc.) - penalize but less than invalid
-        genome.fitness = 1e7;
+        genome.fitness = -1e7;
         return genome.fitness;
 
       case SimulationFailureType::InternalError:
         // Bug in our code or NGSpice - report and treat as very bad
         std::cerr << "Internal error: " << simResult.errorMessage << std::endl;
-        genome.fitness = 1e9;
+        genome.fitness = -1e9;
         return genome.fitness;
 
       default:
-        genome.fitness = 1e9;
+        genome.fitness = -1e9;
         return genome.fitness;
     }
   }
 
   const FrequencyResponse& response = simResult.response;
-  double penalty = 0.0;
+  double fitness = 0.0;  // Start at zero, add rewards, subtract penalties
 
   // Evaluate each harmonic specification
   for (const auto& harmonic : harmonicSpecs) {
@@ -53,28 +65,42 @@ double FitnessEvaluator::Evaluate(CircuitGenome& genome) {
 
     if (harmonic.harmonicOrder == 1) {
       // Fundamental - check passband loss
-      if (attenuation > MaxPassbandLossDb) {
-        penalty += (attenuation - MaxPassbandLossDb) * 100.0;
+      // Give reward for low insertion loss, heavy penalty for high loss
+      if (attenuation <= MaxPassbandLossDb) {
+        // Reward for meeting spec - more reward for lower loss
+        fitness += 1000.0 * (MaxPassbandLossDb - attenuation);
+      } else {
+        // Heavy penalty for exceeding max passband loss
+        // This is the critical issue - need to penalize heavily
+        double excess = attenuation - MaxPassbandLossDb;
+        fitness -= excess * 10000.0;  // Much heavier penalty
       }
     } else {
       // Harmonic - check stopband attenuation
       double outputLevel = harmonic.levelDbc - attenuation;
 
-      if (outputLevel > TargetOutputDbc) {
+      if (outputLevel <= TargetOutputDbc) {
+        // Reward for meeting harmonic suppression spec
+        double margin = TargetOutputDbc - outputLevel;
+        // Weight by harmonic order - 2nd harmonic is most critical
+        double weight = 500.0 * (5.0 / harmonic.harmonicOrder);
+        fitness += margin * weight;
+      } else {
+        // Penalty for not meeting harmonic suppression
         double shortfall = outputLevel - TargetOutputDbc;
         // Weight by harmonic order - 2nd harmonic is most critical
-        double weight = 50.0 * (5.0 / harmonic.harmonicOrder);
-        penalty += shortfall * weight;
+        double weight = 5000.0 * (5.0 / harmonic.harmonicOrder);
+        fitness -= shortfall * weight;
       }
     }
   }
 
-  // Inductor cost penalty
+  // Inductor cost penalty (prefer fewer inductors)
   int inductorCount = genome.CountActiveInductors();
-  penalty += inductorCount * 10.0;  // Prefer fewer inductors
+  fitness -= inductorCount * 100.0;
 
-  genome.fitness = penalty;
-  return penalty;
+  genome.fitness = fitness;
+  return fitness;
 }
 
 double FitnessEvaluator::InterpolateAtFrequency(const FrequencyResponse& response,
@@ -113,15 +139,16 @@ void FitnessEvaluator::PrintDetailedPerformance(const CircuitGenome& genome) con
     return;
   }
 
-  // Submit simulation (get future and wait for result)
-  SimulationResult simResult = SpiceSimulator::GetInstance().RunAcAnalysis(genome).get();
+  // Evaluate genome to get simulation result
+  CircuitGenome tempGenome = genome;  // Make a copy since EvaluateGenome moves it
+  EvaluationResult result = SpiceSimulator::GetInstance().EvaluateGenome(std::move(tempGenome)).get();
 
-  if (!simResult.IsSuccess()) {
-    std::cout << "    Simulation failed: " << simResult.errorMessage << "\n";
+  if (!result.simResult.IsSuccess()) {
+    std::cout << "    Simulation failed: " << result.simResult.errorMessage << "\n";
     return;
   }
 
-  const FrequencyResponse& response = simResult.response;
+  const FrequencyResponse& response = result.simResult.response;
   std::cout << "    Harmonic Performance:\n";
   
   // Group by band

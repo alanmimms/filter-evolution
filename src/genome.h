@@ -52,7 +52,7 @@ public:
   static constexpr int NumDecades = 6;  // Max of the two
 
   std::vector<Component> components;
-  double fitness;
+  double fitness;  // Higher is better
 
   CircuitGenome();
   void Randomize(std::mt19937& rng);

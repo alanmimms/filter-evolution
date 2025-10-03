@@ -218,10 +218,11 @@ int main(int argc, char* argv[]) {
   std::cout << "Loaded " << harmonics.size() << " harmonic specifications\n";
   std::cout << "Covering " << harmonics.size() / 5 << " bands\n\n";
 
-  // Initialize simulator with worker processes
-  SpiceSimulator::GetInstance().SetWorkerCount(config.numThreads);
-
+  // Initialize simulator with worker processes and fitness evaluator
   auto evaluator = std::make_shared<FitnessEvaluator>(harmonics);
+  SpiceSimulator::GetInstance().SetWorkerCount(config.numThreads);
+  SpiceSimulator::GetInstance().SetFitnessEvaluator(evaluator);
+
   EvolutionaryOptimizer optimizer(config, evaluator);
   CircuitGenome best = optimizer.Optimize();
   

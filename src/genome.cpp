@@ -3,13 +3,14 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <iomanip>
 
 // Define static constexpr arrays
 constexpr double CircuitGenome::E24Values[];
 constexpr double CircuitGenome::InductorDecades[];
 constexpr double CircuitGenome::CapacitorDecades[];
 
-CircuitGenome::CircuitGenome() : fitness(std::numeric_limits<double>::max()) {
+CircuitGenome::CircuitGenome() : fitness(std::numeric_limits<double>::lowest()) {
   components.reserve(MaxComponents);
   for (int i = 0; i < MaxComponents; ++i) {
     components.emplace_back();
@@ -206,6 +207,38 @@ std::string CircuitGenome::ToSpiceNetlist(const std::string& outputFile) const {
     return "n" + std::to_string(node);
   };
 
+  // Helper to format component value with appropriate SI prefix
+  auto formatValue = [](double value, bool isInductor) -> std::string {
+    std::ostringstream oss;
+
+    if (isInductor) {
+      // Inductors stored in nH
+      if (value >= 1000000.0) {
+        oss << std::fixed << std::setprecision(2) << (value / 1000000.0) << "mH";
+      } else if (value >= 1000.0) {
+        oss << std::fixed << std::setprecision(2) << (value / 1000.0) << "uH";
+      } else if (value >= 10.0 && value < 1000.0) {
+        oss << std::fixed << std::setprecision(2) << value << "nH";
+      } else {
+        // Fallback to scientific notation for unexpected values
+        oss << std::scientific << std::setprecision(2) << (value * 1e-9) << "H";
+      }
+    } else {
+      // Capacitors stored in pF
+      if (value >= 1000000.0) {
+        oss << std::fixed << std::setprecision(2) << (value / 1000000.0) << "uF";
+      } else if (value >= 1000.0) {
+        oss << std::fixed << std::setprecision(2) << (value / 1000.0) << "nF";
+      } else if (value >= 10.0 && value < 1000.0) {
+        oss << std::fixed << std::setprecision(2) << value << "pF";
+      } else {
+        // Fallback to scientific notation for unexpected values
+        oss << std::scientific << std::setprecision(2) << (value * 1e-12) << "F";
+      }
+    }
+    return oss.str();
+  };
+
   int lCount = 0, cCount = 0;
   for (const auto& comp : components) {
     if (!comp.active) continue;
@@ -214,13 +247,11 @@ std::string CircuitGenome::ToSpiceNetlist(const std::string& outputFile) const {
     std::string nodeB = nodeToName(comp.nodeB);
 
     if (comp.type == ComponentType::Inductor) {
-      double valueH = comp.value * 1e-9;
       netlist << "L" << ++lCount << " " << nodeA << " " << nodeB
-              << " " << std::scientific << valueH << "\n";
+              << " " << formatValue(comp.value, true) << "\n";
     } else {
-      double valueF = comp.value * 1e-12;
       netlist << "C" << ++cCount << " " << nodeA << " " << nodeB
-              << " " << std::scientific << valueF << "\n";
+              << " " << formatValue(comp.value, false) << "\n";
     }
   }
 
